@@ -1,0 +1,13 @@
+# Build from repository root: docker build -f platform/docker/Dockerfile.worker .
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE /app/
+COPY src /app/src
+COPY platform/api /app/platform/api
+WORKDIR /app/platform/api
+RUN uv sync --no-dev
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["uv", "run", "crawlee-platform-worker"]

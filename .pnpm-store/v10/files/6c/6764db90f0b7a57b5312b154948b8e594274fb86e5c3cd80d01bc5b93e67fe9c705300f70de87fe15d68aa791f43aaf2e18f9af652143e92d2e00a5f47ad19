@@ -1,0 +1,117 @@
+{
+  "name": "unplugin-svg-component",
+  "type": "module",
+  "version": "0.12.4",
+  "packageManager": "pnpm@9.0.6",
+  "description": "generate a vue/react component through svg files, supporting svg file HMR and typescript intelligence prompt.",
+  "license": "MIT",
+  "homepage": "https://github.com/jevon617/unplugin-svg-component#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jevon617/unplugin-svg-component.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jevon617/unplugin-svg-component/issues"
+  },
+  "keywords": [
+    "svg",
+    "svg-sprite",
+    "unplugin",
+    "vite",
+    "webpack",
+    "rollup",
+    "transform"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js",
+      "require": "./dist/vite.cjs"
+    },
+    "./webpack": {
+      "types": "./dist/webpack.d.ts",
+      "import": "./dist/webpack.js",
+      "require": "./dist/webpack.cjs"
+    },
+    "./rollup": {
+      "types": "./dist/rollup.d.ts",
+      "import": "./dist/rollup.js",
+      "require": "./dist/rollup.cjs"
+    },
+    "./esbuild": {
+      "types": "./dist/esbuild.d.ts",
+      "import": "./dist/esbuild.js",
+      "require": "./dist/esbuild.cjs"
+    },
+    "./nuxt": {
+      "types": "./dist/nuxt.d.ts",
+      "import": "./dist/nuxt.js",
+      "require": "./dist/nuxt.cjs"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "require": "./dist/types.cjs"
+    },
+    "./*": "./*"
+  },
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/types.d.ts",
+  "typesVersions": {
+    "*": {
+      "*": [
+        "./dist/*",
+        "./*"
+      ]
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch src",
+    "build:fix": "esno scripts/postbuild.ts",
+    "lint": "eslint ./src --fix",
+    "play:vite": "pnpm -C examples/vue2-vite dev",
+    "prepublishOnly": "npm run build",
+    "release": "bumpp && npm publish",
+    "start": "esno src/index.ts",
+    "test": "vitest",
+    "test:e2e": "pnpm -C e2e-test test"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "etag": "^1.8.1",
+    "fast-glob": "^3.3.2",
+    "local-pkg": "^1.1.1",
+    "picocolors": "^1.1.1",
+    "svg-sprite": "^2.0.4",
+    "svgo": "^3.3.2",
+    "unplugin": "^1.16.0"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^2.18.1",
+    "@types/cors": "^2.8.17",
+    "@types/debug": "^4.1.12",
+    "@types/etag": "^1.8.3",
+    "@types/node": "^22.10.0",
+    "@types/svg-sprite": "^0.0.39",
+    "@vue/compiler-sfc": "^3.5.13",
+    "bumpp": "^9.8.1",
+    "chalk": "^5.3.0",
+    "debug": "^4.3.7",
+    "eslint": "^9.15.0",
+    "esno": "^4.8.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.6",
+    "vue": "^3.5.13"
+  }
+}

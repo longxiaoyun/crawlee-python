@@ -77,6 +77,16 @@ If you already have `crawlee` installed, you can spin it up by running:
 crawlee create my-crawler
 ```
 
+## Optional web console (platform)
+
+This repository includes an **optional** Apify-style stack under [`platform/`](platform/README.md): browser editor for Python tasks (`main.py`), debug/production runs with logs, Prometheus metrics, Docker images, and optional AI-assisted drafting. It still executes user code with **Crawlee** as the library runtime. Quick start:
+
+```sh
+docker compose -f platform/docker-compose.yml up --build
+```
+
+Full details: [platform/README.md](platform/README.md). Library documentation remains at [crawlee.dev/python/](https://crawlee.dev/python/).
+
 ## Examples
 
 Here are some practical examples to help you get started with different types of crawlers in Crawlee. Each example demonstrates how to set up and run a crawler for specific use cases, whether you need to handle simple HTML pages or interact with JavaScript-heavy sites. A crawler run will create a `storage/` directory in your current working directory.

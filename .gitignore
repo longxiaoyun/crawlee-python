@@ -15,6 +15,8 @@
 .serena
 .windsurf
 .zed-ai
+.pnpm-store
+.idea
 AGENTS.local.md
 CLAUDE.local.md
 GEMINI.local.md
@@ -64,6 +66,10 @@ Session.vim
 # Docs
 docs/changelog.md
 
+# Platform web (Vite)
+platform/web/node_modules
+platform/web/dist
+
 # Website build artifacts, node dependencies
 website/build
 website/node_modules
@@ -82,3 +88,4 @@ storage/
 
 # Tmp dir
 tmp/
+/openspec/

@@ -1,0 +1,29 @@
+# Example: long-running worker Deployment (adjust image, secrets, and DB URL).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crawlee-platform-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crawlee-platform-worker
+  template:
+    metadata:
+      labels:
+        app: crawlee-platform-worker
+    spec:
+      containers:
+        - name: worker
+          image: your-registry/crawlee-platform-worker:git-sha
+          env:
+            - name: PLATFORM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: crawlee-platform-secrets
+                  key: database_url
+            - name: PLATFORM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: crawlee-platform-secrets
+                  key: api_key

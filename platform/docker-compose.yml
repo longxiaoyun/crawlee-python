@@ -1,0 +1,43 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: platform/docker/Dockerfile.api
+    ports:
+      - '8000:8000'
+    environment:
+      PLATFORM_DATABASE_URL: sqlite+aiosqlite:////data/platform.db
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-api-key}
+      PLATFORM_CORS_ORIGINS: http://localhost:3333,http://127.0.0.1:3333,http://localhost:5173,http://127.0.0.1:5173
+    volumes:
+      - platform_data:/data
+
+  worker:
+    build:
+      context: ..
+      dockerfile: platform/docker/Dockerfile.worker
+    environment:
+      PLATFORM_DATABASE_URL: sqlite+aiosqlite:////data/platform.db
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-api-key}
+    volumes:
+      - platform_data:/data
+
+  web:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    command: >
+      sh -c "corepack enable && corepack prepare pnpm@latest --activate &&
+      pnpm install && pnpm dev --host 0.0.0.0"
+    ports:
+      - '3333:3333'
+    environment:
+      VITE_PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-api-key}
+      VITE_CRAWLEE_API_TARGET: http://api:8000
+      VITE_SKIP_MOCK_LOGIN: "true"
+    volumes:
+      - ./web:/app
+    depends_on:
+      - api
+
+volumes:
+  platform_data:
