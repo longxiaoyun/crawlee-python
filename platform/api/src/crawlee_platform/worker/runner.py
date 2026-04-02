@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import sys
@@ -13,12 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from crawlee_platform import metrics
 from crawlee_platform.config import Settings
-from crawlee_platform.models import Run, RunLogLine, TaskVersion
+from crawlee_platform.models import Run, RunDatasetItem, RunLogLine, TaskVersion
+
+logger = logging.getLogger(__name__)
 
 
 def _pip_module_missing_message() -> str:
@@ -33,6 +36,27 @@ async def _append_log(session: AsyncSession, run_id: UUID, line_no: int, content
     session.add(RunLogLine(run_id=run_id, line_no=line_no, content=content))
     await session.commit()
     return line_no + 1
+
+
+async def _persist_crawlee_default_dataset(session: AsyncSession, run_id: UUID, workspace: Path) -> None:
+    """Import ``storage/datasets/default/*.json`` (Crawlee filesystem layout) into run_dataset_items."""
+    await session.execute(delete(RunDatasetItem).where(RunDatasetItem.run_id == run_id))
+    dataset_dir = workspace / 'storage' / 'datasets' / 'default'
+    if not dataset_dir.is_dir():
+        await session.commit()
+        return
+    files = sorted(
+        (p for p in dataset_dir.glob('*.json') if p.name != '__metadata__.json' and p.stem.isdigit()),
+        key=lambda p: int(p.stem),
+    )
+    for seq, path in enumerate(files, start=1):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            session.add(RunDatasetItem(run_id=run_id, seq=seq, payload=data))
+    await session.commit()
 
 
 async def execute_run(engine: AsyncEngine, run_id: UUID, settings: Settings) -> None:
@@ -170,6 +194,10 @@ async def execute_run(engine: AsyncEngine, run_id: UUID, settings: Settings) -> 
             metrics.runs_failed.labels(kind=run.kind).inc()
             line_no = await _append_log(session, run_id, line_no, f'ERROR: {exc!s}')
         finally:
+            try:
+                await _persist_crawlee_default_dataset(session, run_id, workspace)
+            except Exception:
+                logger.exception('Failed to persist Crawlee default dataset for run %s', run_id)
             shutil.rmtree(workspace, ignore_errors=True)
 
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated
+from subprocess import TimeoutExpired
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Response, Security
@@ -24,10 +24,22 @@ from crawlee_platform.config import Settings
 from crawlee_platform.db import get_engine
 from crawlee_platform.deps import get_settings
 from crawlee_platform import metrics as platform_metrics
-from crawlee_platform.models import Base, ChatMessage, Run, RunLogLine, Task, TaskVersion, WorkerHeartbeat
+from crawlee_platform.models import (
+    Base,
+    ChatMessage,
+    Run,
+    RunDatasetItem,
+    RunLogLine,
+    Task,
+    TaskVersion,
+    TaskWizardMessage,
+    TaskWizardSession,
+    WorkerHeartbeat,
+)
 from crawlee_platform.schemas import (
     ChatRequest,
     ChatResponse,
+    DeployInfoOut,
     DeployOut,
     DeployRequest,
     OverviewOut,
@@ -40,7 +52,16 @@ from crawlee_platform.schemas import (
     TaskUpdate,
     TaskVersionCreate,
     TaskVersionOut,
+    WizardFinalizeBody,
+    WizardFinalizeOut,
+    WizardMessageBody,
+    WizardMessageOut,
+    WizardSessionCreateOut,
+    WizardSessionListItem,
+    WizardSessionMetaOut,
 )
+from crawlee_platform.deploy_service import run_full_docker_deploy
+from crawlee_platform.wizard_service import complete_wizard_turn, sanitize_wizard_settings
 
 
 async def _ensure_sqlite_task_settings_column(engine) -> None:
@@ -105,20 +126,12 @@ def _validate_crawlee_source(source_code: str) -> None:
     raise HTTPException(status_code=400, detail=detail)
 
 
-_JS_TEMPLATE_LITERAL_RE = re.compile(r'`[^`\n]*\$\{')
-
-
 def _validate_saved_main_py(source_code: str) -> None:
-    """Reject obvious non-Python (e.g. JS template strings) and invalid Python before persisting a version."""
-    if _JS_TEMPLATE_LITERAL_RE.search(source_code):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                'main.py contains JavaScript-style template literals (backticks with ${...}). '
-                'In Python use f-strings, e.g. context.log.info(f"count {len(links)}") instead of '
-                '`...${links.length}...`, and use len(links) instead of links.length.'
-            ),
-        )
+    """Ensure main.py is valid Python before persisting a version (compile check only).
+
+    We do not regex-scan the whole file for JS template literals: that false-positives in comments or strings.
+    If compile() fails on a line containing backticks and '${', append a targeted hint.
+    """
     try:
         compile(source_code, 'main.py', 'exec')
     except SyntaxError as e:
@@ -127,12 +140,21 @@ def _validate_saved_main_py(source_code: str) -> None:
         line_snip = (e.text or '').strip()
         pointer = (' ' * max(0, off) + '^') if e.text and off >= 0 else ''
         tail = '\n'.join(x for x in (line_snip, pointer) if x)[:200]
+        err_line = e.text or ''
+        js_hint = ''
+        if '`' in err_line and '${' in err_line:
+            js_hint = (
+                ' This often comes from JavaScript-style template literals (backticks with ${...}). '
+                'In Python use f-strings, e.g. context.log.info(f"count {len(links)}") not '
+                '`...${links.length}...`, and use len(links) instead of links.length.'
+            )
+        else:
+            js_hint = ' If you pasted JavaScript, use Python syntax (f-strings, len(x) not x.length).'
         raise HTTPException(
             status_code=400,
             detail=(
-                f'Python syntax error in main.py (line {lineno}): {e.msg}. '
-                'If you pasted JavaScript, use Python syntax (f-strings, len(x) not x.length). '
-                + (f'Context:\n{tail}' if tail else '')
+                f'Python syntax error in main.py (line {lineno}): {e.msg}.{js_hint}'
+                + (f' Context:\n{tail}' if tail else '')
             ),
         ) from None
 
@@ -155,16 +177,34 @@ DEFAULT_TASK_SOURCE = '''import asyncio
 from crawlee.crawlers import BeautifulSoupCrawler, BeautifulSoupCrawlingContext
 
 
+def _heading_texts(soup, tag: str) -> list[str]:
+    """Collect visible text for all matching heading tags (order preserved)."""
+    return [el.get_text(strip=True) for el in soup.find_all(tag) if el.get_text(strip=True)]
+
+
 async def main() -> None:
     """Minimal Crawlee crawler — edit URLs and handler as needed."""
     crawler = BeautifulSoupCrawler(max_requests_per_crawl=5)
 
     @crawler.router.default_handler
     async def request_handler(context: BeautifulSoupCrawlingContext) -> None:
-        context.log.info(f"Processing {context.request.url} ...")
-        title_el = context.soup.title
+        soup = context.soup
+        title_el = soup.title
         title = title_el.get_text(strip=True) if title_el else None
-        await context.push_data({"url": context.request.url, "title": title})
+        h1s = _heading_texts(soup, "h1")
+        h2s = _heading_texts(soup, "h2")
+        h3s = _heading_texts(soup, "h3")
+        await context.push_data(
+            {
+                "url": context.request.url,
+                "title": title,
+                "h1s": h1s,
+                "h2s": h2s,
+                "h3s": h3s,
+            }
+        )
+        # Python uses f-strings and len(x), not JavaScript `...${x.length}...`.
+        context.log.info(f"页面已写入数据集：约 {len(h1s) + len(h2s) + len(h3s)} 条标题文本（h1/h2/h3 合计，示例）")
 
     await crawler.run(["https://crawlee.dev"])
 
@@ -211,6 +251,14 @@ async def _ensure_tasks_have_initial_version(engine) -> None:
 
 async def require_key(_: Annotated[None, Depends(require_api_key)]) -> None:
     """Marker dependency for protected routes."""
+
+
+def _require_wizard_enabled(settings: Annotated[Settings, Depends(get_settings)]) -> None:
+    if not settings.enable_smart_task_wizard:
+        raise HTTPException(status_code=404, detail='Smart task wizard is disabled')
+
+
+WizardDeps = [Depends(require_key), Depends(_require_wizard_enabled)]
 
 
 @app.get('/health')
@@ -270,6 +318,27 @@ async def overview(
         recent_success_ratio=ratio,
         queued_runs=queued,
         running_runs=running,
+    )
+
+
+@app.get('/api/deploy-info', dependencies=[Depends(require_key)])
+async def deploy_info(settings: Annotated[Settings, Depends(get_settings)]) -> DeployInfoOut:
+    """Expose registry + SSH target for the deployment UI (no credentials)."""
+    reg = settings.acr_registry.rstrip('/')
+    ns = settings.acr_namespace.strip('/')
+    repo = settings.acr_repository.strip('/')
+    image_repository = f'{reg}/{ns}/{repo}'
+    return DeployInfoOut(
+        docker_deploy_enabled=settings.docker_deploy_enabled,
+        acr_registry=settings.acr_registry,
+        acr_namespace=settings.acr_namespace,
+        acr_repository=settings.acr_repository,
+        image_repository=image_repository,
+        deploy_ssh_host=settings.deploy_ssh_host,
+        deploy_ssh_user=settings.deploy_ssh_user,
+        deploy_ssh_port=settings.deploy_ssh_port,
+        deploy_container_name=settings.deploy_container_name,
+        deploy_skip_ssh=settings.deploy_skip_ssh,
     )
 
 
@@ -445,9 +514,9 @@ async def delete_task(task_id: UUID, session: AsyncSessionDep) -> Response:
     task = await session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
-    await session.execute(
-        delete(RunLogLine).where(RunLogLine.run_id.in_(select(Run.id).where(Run.task_id == task_id)))
-    )
+    run_ids_subq = select(Run.id).where(Run.task_id == task_id)
+    await session.execute(delete(RunDatasetItem).where(RunDatasetItem.run_id.in_(run_ids_subq)))
+    await session.execute(delete(RunLogLine).where(RunLogLine.run_id.in_(run_ids_subq)))
     await session.execute(delete(Run).where(Run.task_id == task_id))
     await session.execute(delete(TaskVersion).where(TaskVersion.task_id == task_id))
     await session.execute(delete(ChatMessage).where(ChatMessage.task_id == task_id))
@@ -512,7 +581,12 @@ async def promote_version(task_id: UUID, session: AsyncSessionDep, body: Promote
 
 
 @app.post('/api/tasks/{task_id}/deploy', dependencies=[Depends(require_key)])
-async def deploy_task(task_id: UUID, session: AsyncSessionDep, body: DeployRequest) -> DeployOut:
+async def deploy_task(
+    task_id: UUID,
+    session: AsyncSessionDep,
+    body: DeployRequest,
+    app_settings: Annotated[Settings, Depends(get_settings)],
+) -> DeployOut:
     task = await session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
@@ -528,8 +602,26 @@ async def deploy_task(task_id: UUID, session: AsyncSessionDep, body: DeployReque
     _validate_crawlee_source(ver.source_code)
 
     deployed_at = datetime.now(timezone.utc)
+    image_ref: str | None = None
+    remote_ok: bool | None = None
+    detail: str | None = None
+    remote_host: str | None = None
+
+    if app_settings.docker_deploy_enabled:
+        try:
+            result = await asyncio.to_thread(run_full_docker_deploy, app_settings, ver, task_id)
+        except TimeoutExpired:
+            raise HTTPException(status_code=504, detail='Docker build/push or SSH deploy timed out') from None
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        image_ref = result.image_ref
+        remote_ok = result.remote_ok
+        detail = result.log[-6000:] if len(result.log) > 6000 else result.log
+        if not app_settings.deploy_skip_ssh:
+            remote_host = app_settings.deploy_ssh_host
+
     current_settings = dict(task.settings or {})
-    current_settings['deployment'] = {
+    dep: dict[str, Any] = {
         'status': 'deployed',
         'environment': body.environment,
         'runtime': 'crawlee',
@@ -537,6 +629,13 @@ async def deploy_task(task_id: UUID, session: AsyncSessionDep, body: DeployReque
         'version_id': str(ver.id),
         'deployed_at': deployed_at.isoformat(),
     }
+    if image_ref is not None:
+        dep['image_ref'] = image_ref
+    if remote_ok is not None:
+        dep['remote_ok'] = remote_ok
+    if detail:
+        dep['last_deploy_log'] = detail
+    current_settings['deployment'] = dep
     task.settings = current_settings
     await session.commit()
 
@@ -548,6 +647,10 @@ async def deploy_task(task_id: UUID, session: AsyncSessionDep, body: DeployReque
         entrypoint='main.py',
         deployed_at=deployed_at,
         status='deployed',
+        image_ref=image_ref,
+        remote_host=remote_host,
+        remote_ok=remote_ok,
+        detail=detail,
     )
 
 
@@ -606,6 +709,19 @@ async def get_logs(run_id: UUID, session: AsyncSessionDep) -> list[dict[str, int
         )
     ).all()
     return [{'line_no': r.line_no, 'content': r.content} for r in rows]
+
+
+@app.get('/api/runs/{run_id}/dataset-items', dependencies=[Depends(require_key)])
+async def get_run_dataset_items(run_id: UUID, session: AsyncSessionDep) -> list[dict[str, int | dict[str, Any]]]:
+    run = await session.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail='Run not found')
+    rows = (
+        await session.scalars(
+            select(RunDatasetItem).where(RunDatasetItem.run_id == run_id).order_by(RunDatasetItem.seq.asc())
+        )
+    ).all()
+    return [{'seq': r.seq, 'item': r.payload} for r in rows]
 
 
 @app.get('/api/runs/{run_id}/logs/stream', dependencies=[Depends(require_key)])
@@ -694,6 +810,178 @@ async def list_chat(task_id: UUID, session: AsyncSessionDep) -> list[dict[str, s
         }
         for r in rows
     ]
+
+
+@app.get('/api/ai/task-wizard/sessions', dependencies=WizardDeps)
+async def list_wizard_sessions(
+    session: AsyncSessionDep,
+    limit: int = 50,
+) -> list[WizardSessionListItem]:
+    """Recent wizard sessions (newest first), for chat history UI."""
+    limit = min(max(limit, 1), 100)
+    rows = (
+        await session.scalars(
+            select(TaskWizardSession)
+            .order_by(TaskWizardSession.updated_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    if not rows:
+        return []
+    ids = [r.id for r in rows]
+    count_rows = await session.execute(
+        select(TaskWizardMessage.session_id, func.count(TaskWizardMessage.id))
+        .where(TaskWizardMessage.session_id.in_(ids))
+        .group_by(TaskWizardMessage.session_id)
+    )
+    counts = {sid: int(c) for sid, c in count_rows.all()}
+    urows = (
+        await session.scalars(
+            select(TaskWizardMessage)
+            .where(
+                TaskWizardMessage.session_id.in_(ids),
+                TaskWizardMessage.role == 'user',
+            )
+            .order_by(TaskWizardMessage.created_at.asc())
+        )
+    ).all()
+    first_preview: dict[UUID, str] = {}
+    for m in urows:
+        if m.session_id in first_preview:
+            continue
+        raw = (m.content or '').strip().replace('\n', ' ')
+        if len(raw) > 120:
+            first_preview[m.session_id] = f'{raw[:120]}…'
+        else:
+            first_preview[m.session_id] = raw
+    out: list[WizardSessionListItem] = []
+    for ws in rows:
+        out.append(
+            WizardSessionListItem(
+                session_id=ws.id,
+                status=ws.status,
+                created_at=ws.created_at,
+                updated_at=ws.updated_at,
+                preview=first_preview.get(ws.id, ''),
+                message_count=counts.get(ws.id, 0),
+            )
+        )
+    return out
+
+
+@app.get('/api/ai/task-wizard/sessions/{session_id}', dependencies=WizardDeps)
+async def get_wizard_session_meta(session_id: UUID, session: AsyncSessionDep) -> WizardSessionMetaOut:
+    ws = await session.get(TaskWizardSession, session_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail='Wizard session not found')
+    return WizardSessionMetaOut(
+        session_id=ws.id,
+        status=ws.status,
+        created_at=ws.created_at,
+        updated_at=ws.updated_at,
+    )
+
+
+@app.post('/api/ai/task-wizard/sessions', dependencies=WizardDeps)
+async def create_wizard_session(session: AsyncSessionDep) -> WizardSessionCreateOut:
+    ws = TaskWizardSession(status='active')
+    session.add(ws)
+    await session.commit()
+    await session.refresh(ws)
+    return WizardSessionCreateOut(session_id=ws.id)
+
+
+@app.get('/api/ai/task-wizard/sessions/{session_id}/messages', dependencies=WizardDeps)
+async def list_wizard_messages(session_id: UUID, session: AsyncSessionDep) -> list[dict[str, str]]:
+    ws = await session.get(TaskWizardSession, session_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail='Wizard session not found')
+    rows = (
+        await session.scalars(
+            select(TaskWizardMessage)
+            .where(TaskWizardMessage.session_id == session_id)
+            .order_by(TaskWizardMessage.created_at.asc())
+        )
+    ).all()
+    return [{'role': r.role, 'content': r.content} for r in rows]
+
+
+@app.post('/api/ai/task-wizard/sessions/{session_id}/messages', dependencies=WizardDeps)
+async def post_wizard_message(
+    session_id: UUID,
+    session: AsyncSessionDep,
+    body: WizardMessageBody,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> WizardMessageOut:
+    ws = await session.get(TaskWizardSession, session_id)
+    if not ws or ws.status != 'active':
+        raise HTTPException(status_code=404, detail='Wizard session not found or already finalized')
+
+    session.add(TaskWizardMessage(session_id=session_id, role='user', content=body.message))
+    await session.flush()
+
+    history_rows = (
+        await session.scalars(
+            select(TaskWizardMessage)
+            .where(TaskWizardMessage.session_id == session_id)
+            .order_by(TaskWizardMessage.created_at.asc())
+        )
+    ).all()
+    prior: list[dict[str, str]] = [{'role': r.role, 'content': r.content} for r in history_rows[:-1]]
+
+    reply, draft = await complete_wizard_turn(
+        settings=settings,
+        prior_messages=prior,
+        user_message=body.message,
+    )
+
+    session.add(TaskWizardMessage(session_id=session_id, role='assistant', content=reply))
+    await session.commit()
+
+    return WizardMessageOut(reply=reply, draft=draft)
+
+
+@app.post('/api/ai/task-wizard/sessions/{session_id}/finalize', dependencies=WizardDeps)
+async def finalize_wizard_session(
+    session_id: UUID,
+    session: AsyncSessionDep,
+    body: WizardFinalizeBody,
+) -> WizardFinalizeOut:
+    ws = await session.get(TaskWizardSession, session_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail='Wizard session not found')
+    if ws.status != 'active':
+        raise HTTPException(status_code=400, detail='Wizard session already finalized')
+
+    _validate_saved_main_py(body.source_code)
+    safe_settings = sanitize_wizard_settings(dict(body.settings))
+
+    task = Task(
+        name=body.name.strip(),
+        description=body.description,
+        settings=safe_settings,
+    )
+    session.add(task)
+    await session.flush()
+
+    ver = TaskVersion(
+        task_id=task.id,
+        version_number=1,
+        source_code=body.source_code,
+        requirements_txt=body.requirements_txt,
+        meta={'origin': 'ai_wizard'},
+        created_by='wizard',
+    )
+    session.add(ver)
+    await session.flush()
+    task.production_version_id = ver.id
+
+    ws.status = 'finalized'
+    await session.commit()
+    await session.refresh(task)
+    await session.refresh(ver)
+
+    return WizardFinalizeOut(task_id=task.id, version_id=ver.id)
 
 
 def run() -> None:

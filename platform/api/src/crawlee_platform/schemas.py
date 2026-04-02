@@ -83,6 +83,25 @@ class DeployOut(BaseModel):
     entrypoint: str
     deployed_at: datetime
     status: str
+    image_ref: str | None = None
+    remote_host: str | None = None
+    remote_ok: bool | None = None
+    detail: str | None = None
+
+
+class DeployInfoOut(BaseModel):
+    """Non-secret deploy targets for the console (from Settings + platform.deploy.json)."""
+
+    docker_deploy_enabled: bool
+    acr_registry: str
+    acr_namespace: str
+    acr_repository: str
+    image_repository: str
+    deploy_ssh_host: str
+    deploy_ssh_user: str
+    deploy_ssh_port: int
+    deploy_container_name: str
+    deploy_skip_ssh: bool
 
 
 class RunCreate(BaseModel):
@@ -120,3 +139,49 @@ class OverviewOut(BaseModel):
     recent_success_ratio: float
     queued_runs: int
     running_runs: int
+
+
+class WizardSessionCreateOut(BaseModel):
+    session_id: uuid.UUID
+
+
+class WizardSessionMetaOut(BaseModel):
+    """Single wizard session metadata (for UI: readonly vs active)."""
+
+    session_id: uuid.UUID
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WizardSessionListItem(BaseModel):
+    """Row for GET /api/ai/task-wizard/sessions history list."""
+
+    session_id: uuid.UUID
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    preview: str = ''
+    message_count: int = 0
+
+
+class WizardMessageBody(BaseModel):
+    message: str = Field(min_length=1)
+
+
+class WizardMessageOut(BaseModel):
+    reply: str
+    draft: dict[str, Any] | None = None
+
+
+class WizardFinalizeBody(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str = ''
+    source_code: str = Field(min_length=1)
+    requirements_txt: str = ''
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class WizardFinalizeOut(BaseModel):
+    task_id: uuid.UUID
+    version_id: uuid.UUID

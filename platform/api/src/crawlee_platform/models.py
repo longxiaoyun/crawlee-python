@@ -68,6 +68,11 @@ class Run(Base):
         back_populates='run',
         order_by='RunLogLine.line_no',
     )
+    dataset_items: Mapped[list['RunDatasetItem']] = relationship(
+        back_populates='run',
+        order_by='RunDatasetItem.seq',
+        cascade='all, delete-orphan',
+    )
 
 
 class RunLogLine(Base):
@@ -80,6 +85,53 @@ class RunLogLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped[Run] = relationship('Run', back_populates='log_lines')
+
+
+class RunDatasetItem(Base):
+    """Crawlee default filesystem dataset items copied into the control-plane DB after each run."""
+
+    __tablename__ = 'run_dataset_items'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey('runs.id', ondelete='CASCADE'), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    run: Mapped[Run] = relationship('Run', back_populates='dataset_items')
+
+
+class TaskWizardSession(Base):
+    """Pre-task AI wizard: multi-turn chat before a Task row exists."""
+
+    __tablename__ = 'task_wizard_sessions'
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default='active')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    messages: Mapped[list['TaskWizardMessage']] = relationship(
+        back_populates='session',
+        order_by='TaskWizardMessage.created_at',
+        cascade='all, delete-orphan',
+    )
+
+
+class TaskWizardMessage(Base):
+    __tablename__ = 'task_wizard_messages'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey('task_wizard_sessions.id', ondelete='CASCADE'), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    session: Mapped[TaskWizardSession] = relationship(back_populates='messages')
 
 
 class ChatMessage(Base):
