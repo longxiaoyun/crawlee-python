@@ -292,7 +292,7 @@ class BasicCrawler(Generic[TCrawlingContext, TStatisticsState]):
         additional_http_error_status_codes: Iterable[int] | None = None,
         ignore_http_error_status_codes: Iterable[int] | None = None,
         concurrency_settings: ConcurrencySettings | None = None,
-        request_handler_timeout: timedelta = timedelta(minutes=1),
+        request_handler_timeout: timedelta | int | float = timedelta(minutes=1),  # noqa: PYI041
         statistics: Statistics[TStatisticsState] | None = None,
         abort_on_error: bool = False,
         keep_alive: bool = False,
@@ -341,7 +341,8 @@ class BasicCrawler(Generic[TCrawlingContext, TStatisticsState]):
             ignore_http_error_status_codes: HTTP status codes that are typically considered errors but should be treated
                 as successful responses.
             concurrency_settings: Settings to fine-tune concurrency levels.
-            request_handler_timeout: Maximum duration allowed for a single request handler to run.
+            request_handler_timeout: Maximum duration allowed for a single request handler to run. A numeric
+                ``int`` or ``float`` is interpreted as seconds (for convenience); prefer :class:`~datetime.timedelta`.
             statistics: A custom `Statistics` instance, allowing the use of non-default configuration.
             abort_on_error: If True, the crawler stops immediately when any request handler error occurs.
             keep_alive: If True, it will keep crawler alive even if there are no requests in queue.
@@ -433,12 +434,15 @@ class BasicCrawler(Generic[TCrawlingContext, TStatisticsState]):
         self._max_crawl_depth = max_crawl_depth
         self._respect_robots_txt_file = respect_robots_txt_file
 
-        # Timeouts
-        self._request_handler_timeout = request_handler_timeout
+        # Timeouts (int/float = seconds, matches common mistake passing HTTP-style second counts)
+        _request_handler_timeout = request_handler_timeout
+        if isinstance(_request_handler_timeout, (int, float)):
+            _request_handler_timeout = timedelta(seconds=float(_request_handler_timeout))
+        self._request_handler_timeout = _request_handler_timeout
         self._internal_timeout = (
             config.internal_timeout
             if config.internal_timeout is not None
-            else max(2 * request_handler_timeout, timedelta(minutes=5))
+            else max(2 * _request_handler_timeout, timedelta(minutes=5))
         )
 
         # Retry and session settings

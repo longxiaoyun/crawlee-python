@@ -27,7 +27,7 @@ class PlaywrightPreNavCrawlingContext(BasicCrawlingContext):
     """Blocks network requests matching specified URL patterns."""
 
     goto_options: GotoOptions
-    """Additional options to pass to Playwright's `Page.goto()` method. The `timeout` option is not supported."""
+    """Additional options passed to Playwright ``Page.goto()`` (excluding ``timeout``, merged in the crawler)."""
 
     async def get_snapshot(self) -> PageSnapshot:
         """Get snapshot of crawled page."""

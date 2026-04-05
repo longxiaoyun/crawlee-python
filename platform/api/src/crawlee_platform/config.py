@@ -17,6 +17,31 @@ def _platform_deploy_json_path() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _default_crawlee_source_path() -> Path | None:
+    """Resolve ``<repo>/src`` (contains ``crawlee/``) from this package layout.
+
+    Uses two anchors so discovery still works if ``__file__`` resolution differs between
+    API and worker: ``crawlee_platform/config.py`` (repo root = parents[4]) and
+    ``crawlee_platform/worker/runner.py`` (repo root = parents[5]).
+    """
+    config_file = Path(__file__).resolve()
+    candidates: list[Path] = []
+    try:
+        candidates.append(config_file.parents[4] / 'src')
+    except IndexError:
+        pass
+    runner = config_file.parent / 'worker' / 'runner.py'
+    if runner.is_file():
+        try:
+            candidates.append(runner.resolve().parents[5] / 'src')
+        except IndexError:
+            pass
+    for candidate in candidates:
+        if (candidate / 'crawlee' / '__init__.py').is_file():
+            return candidate
+    return None
+
+
 class Settings(BaseSettings):
     """Environment-driven configuration; JSON file overrides defaults (env overrides JSON)."""
 
@@ -39,12 +64,27 @@ class Settings(BaseSettings):
         sources.append(file_secret_settings)
         return tuple(sources)
 
+    # Primary URL; default SQLite. You may set full MySQL URL here instead of mysql_* below.
     database_url: str = 'sqlite+aiosqlite:///./platform.db'
+    # When MySQL is unreachable, API/worker fall back to this SQLite file (see db.init_database).
+    sqlite_fallback_url: str = 'sqlite+aiosqlite:///./platform.db'
+    # Optional MySQL — set host + user + database (+ password via env) to prefer MySQL over SQLite.
+    mysql_host: str | None = None
+    mysql_port: int = 3306
+    mysql_user: str | None = None
+    mysql_password: str | None = None
+    mysql_database: str | None = None
+    mysql_charset: str = 'utf8mb4'
     api_key: str = 'dev-api-key'
 
     debug_run_timeout_sec: int = 300
     prod_run_timeout_sec: int = 86400
     debug_max_pip_packages: int = 20
+
+    #: Directory that contains the ``crawlee`` package (i.e. ``.../crawlee-python/src``). When unset,
+    #: the worker tries the monorepo layout next to ``platform/api``. Prepend to ``PYTHONPATH`` so task
+    #: runs use this tree instead of ``pip install --target deps`` (PyPI) crawlee.
+    crawlee_source_path: Path | None = None
 
     openai_api_key: str | None = None
     openai_base_url: str = 'https://api.openai.com/v1'
@@ -90,3 +130,28 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(',') if o.strip()]
+
+    @property
+    def effective_crawlee_source_path(self) -> Path | None:
+        """Directory on ``PYTHONPATH`` that provides ``import crawlee`` (local ``src``), or ``None``."""
+        if self.crawlee_source_path is not None:
+            p = Path(self.crawlee_source_path).expanduser().resolve()
+            if (p / 'crawlee' / '__init__.py').is_file():
+                return p
+            return None
+        return _default_crawlee_source_path()
+
+    def task_source_for_run_and_storage(self, source_code: str) -> str:
+        """Return ``main.py`` text as saved and executed.
+
+        When :attr:`effective_crawlee_source_path` is set (local monorepo ``src``), the source is
+        left as-is — equivalent to ``uv run python main.py`` with that tree on ``PYTHONPATH``.
+        Otherwise PyPI-compatible tweaks are applied (e.g. ``ConcurrencySettings`` defaults).
+        """
+        if self.effective_crawlee_source_path is not None:
+            return source_code
+        from crawlee_platform.worker.source_normalize import (  # noqa: PLC0415
+            normalize_task_source_for_worker,
+        )
+
+        return normalize_task_source_for_worker(source_code)

@@ -86,6 +86,11 @@ async def test_processes_requests_from_request_source_tandem() -> None:
     }
 
 
+def test_request_handler_timeout_int_seconds_normalized() -> None:
+    crawler = BasicCrawler(request_handler_timeout=60)
+    assert crawler._request_handler_timeout == timedelta(seconds=60)
+
+
 async def test_processes_requests_from_run_args() -> None:
     crawler = BasicCrawler()
     calls = list[str]()

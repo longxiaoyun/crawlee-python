@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crawlee_platform.ai_service import complete_chat
 from crawlee_platform.auth import _api_key_header, require_api_key
 from crawlee_platform.config import Settings
-from crawlee_platform.db import get_engine
+from crawlee_platform.db import get_engine, init_database
 from crawlee_platform.deps import get_settings
 from crawlee_platform import metrics as platform_metrics
 from crawlee_platform.models import (
@@ -78,6 +78,7 @@ async def _ensure_sqlite_task_settings_column(engine) -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     settings = get_settings()
+    await init_database(settings)
     engine = get_engine(settings)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -172,53 +173,81 @@ AsyncSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 
 # First build is 0.0.1 (patch = version_number 1); each new version increments patch.
 # Runnable Crawlee template (worker runs `python main.py` with same interpreter; deps from requirements.txt).
-DEFAULT_TASK_SOURCE = '''import asyncio
+DEFAULT_TASK_SOURCE = r'''import asyncio
+from datetime import datetime, timedelta, timezone
 
-from crawlee.crawlers import BeautifulSoupCrawler, BeautifulSoupCrawlingContext
+from crawlee import ConcurrencySettings
+from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 
-
-def _heading_texts(soup, tag: str) -> list[str]:
-    """Collect visible text for all matching heading tags (order preserved)."""
-    return [el.get_text(strip=True) for el in soup.find_all(tag) if el.get_text(strip=True)]
+START_URL = 'https://juejin.cn/'
 
 
 async def main() -> None:
-    """Minimal Crawlee crawler — edit URLs and handler as needed."""
-    crawler = BeautifulSoupCrawler(max_requests_per_crawl=5)
+    crawler = PlaywrightCrawler(
+        headless=False,
+        max_requests_per_crawl=50,
+        concurrency_settings=ConcurrencySettings(
+            min_concurrency=1,
+            max_concurrency=2,
+            desired_concurrency=2,
+        ),
+        request_handler_timeout=timedelta(seconds=60),
+        goto_options={'wait_until': 'networkidle', 'timeout': 30000},
+    )
 
     @crawler.router.default_handler
-    async def request_handler(context: BeautifulSoupCrawlingContext) -> None:
-        soup = context.soup
-        title_el = soup.title
-        title = title_el.get_text(strip=True) if title_el else None
-        h1s = _heading_texts(soup, "h1")
-        h2s = _heading_texts(soup, "h2")
-        h3s = _heading_texts(soup, "h3")
-        await context.push_data(
-            {
-                "url": context.request.url,
-                "title": title,
-                "h1s": h1s,
-                "h2s": h2s,
-                "h3s": h3s,
-            }
+    async def request_handler(context: PlaywrightCrawlingContext) -> None:
+        page = context.page
+        url = context.request.url
+
+        if '/post/' in url:
+            await page.wait_for_timeout(1500)
+            await page.wait_for_selector('h1.article-title', timeout=10000)
+            data = await page.evaluate(
+                """() => {
+                const title = document.querySelector('h1.article-title')?.innerText || '无标题';
+                const content = document.querySelector('.article-content')?.innerText || '无内容';
+                return { title, content };
+            }"""
+            )
+            await context.push_data(
+                {
+                    'url': url,
+                    'title': data['title'],
+                    'content': (data['content'] or '').strip()[:500],
+                    'crawled_at': datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            return
+
+        await page.wait_for_timeout(2000)
+        await page.wait_for_selector('div.entry-list', timeout=15000)
+        article_links = await page.evaluate(
+            """() => {
+            const links = [];
+            document.querySelectorAll('.entry-list a.jj-link.title[href*="/post/"]').forEach((a) => {
+                links.push(new URL(a.getAttribute('href') || '', location.origin).href);
+            });
+            return [...new Set(links)];
+        }"""
         )
-        # Python uses f-strings and len(x), not JavaScript `...${x.length}...`.
-        context.log.info(f"页面已写入数据集：约 {len(h1s) + len(h2s) + len(h3s)} 条标题文本（h1/h2/h3 合计，示例）")
+        await context.add_requests(article_links[:10])
 
-    await crawler.run(["https://crawlee.dev"])
+    @crawler.failed_request_handler
+    async def on_failed(context: PlaywrightCrawlingContext, error: Exception) -> None:
+        context.log.error(f'failed {context.request.url}: {error!s}'[:200])
+
+    await crawler.run([START_URL])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
 '''
 
-# Explicit beautifulsoup4: `pip install --target deps` + PYTHONPATH=deps must contain bs4;
-# otherwise import falls back to a global editable crawlee without the optional extra.
+# Playwright extra: worker `pip install --target deps` + host/browser deps for headless runs.
 DEFAULT_TASK_REQUIREMENTS = (
-    'crawlee[beautifulsoup]\n'
-    'beautifulsoup4>=4.12.0\n'
-    'html5lib>=1.0\n'
+    'crawlee[playwright]\n'
+    'playwright>=1.27.0\n'
 )
 
 
@@ -263,7 +292,9 @@ WizardDeps = [Depends(require_key), Depends(_require_wizard_enabled)]
 
 @app.get('/health')
 async def health() -> dict[str, str]:
-    return {'status': 'ok'}
+    from crawlee_platform.db import get_database_backend
+
+    return {'status': 'ok', 'database': get_database_backend()}
 
 
 @app.get('/metrics')
@@ -543,11 +574,13 @@ async def create_version(
     task_id: UUID,
     session: AsyncSessionDep,
     body: TaskVersionCreate,
+    app_settings: Annotated[Settings, Depends(get_settings)],
 ) -> TaskVersionOut:
     task = await session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
-    _validate_saved_main_py(body.source_code)
+    normalized_source = app_settings.task_source_for_run_and_storage(body.source_code)
+    _validate_saved_main_py(normalized_source)
     last_num = await session.scalar(
         select(func.max(TaskVersion.version_number)).where(TaskVersion.task_id == task_id)
     )
@@ -555,7 +588,7 @@ async def create_version(
     ver = TaskVersion(
         task_id=task_id,
         version_number=next_num,
-        source_code=body.source_code,
+        source_code=normalized_source,
         requirements_txt=body.requirements_txt,
         meta=body.meta,
         created_by=body.created_by,
@@ -946,6 +979,7 @@ async def finalize_wizard_session(
     session_id: UUID,
     session: AsyncSessionDep,
     body: WizardFinalizeBody,
+    app_settings: Annotated[Settings, Depends(get_settings)],
 ) -> WizardFinalizeOut:
     ws = await session.get(TaskWizardSession, session_id)
     if not ws:
@@ -953,7 +987,8 @@ async def finalize_wizard_session(
     if ws.status != 'active':
         raise HTTPException(status_code=400, detail='Wizard session already finalized')
 
-    _validate_saved_main_py(body.source_code)
+    normalized_source = app_settings.task_source_for_run_and_storage(body.source_code)
+    _validate_saved_main_py(normalized_source)
     safe_settings = sanitize_wizard_settings(dict(body.settings))
 
     task = Task(
@@ -967,7 +1002,7 @@ async def finalize_wizard_session(
     ver = TaskVersion(
         task_id=task.id,
         version_number=1,
-        source_code=body.source_code,
+        source_code=normalized_source,
         requirements_txt=body.requirements_txt,
         meta={'origin': 'ai_wizard'},
         created_by='wizard',

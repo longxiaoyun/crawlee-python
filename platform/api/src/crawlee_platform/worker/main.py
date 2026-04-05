@@ -7,10 +7,11 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crawlee_platform import metrics
 from crawlee_platform.config import Settings
+from crawlee_platform.db import get_engine, init_database
 from crawlee_platform.models import Base, WorkerHeartbeat
 from crawlee_platform.worker.runner import claim_next_run, execute_run
 
@@ -32,7 +33,8 @@ async def _heartbeat(
 
 async def _async_main() -> None:
     settings = Settings()
-    engine = create_async_engine(settings.database_url)
+    await init_database(settings)
+    engine = get_engine(settings)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

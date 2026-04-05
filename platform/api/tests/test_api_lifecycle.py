@@ -34,7 +34,7 @@ async def test_new_task_has_initial_build_0_0_1(platform_client: AsyncClient) ->
     assert versions[0]['id'] == body['production_version_id']
     assert 'async def main' in versions[0]['source_code']
     assert 'crawlee' in versions[0]['source_code']
-    assert 'beautifulsoup' in versions[0]['requirements_txt'].lower()
+    assert 'playwright' in versions[0]['requirements_txt'].lower()
 
 
 @pytest.mark.asyncio
@@ -306,6 +306,49 @@ async def test_deploy_requires_crawlee_contract(platform_client: AsyncClient) ->
     deployed = r.json()
     assert deployed['status'] == 'deployed'
     assert deployed['runtime'] == 'crawlee'
+
+
+@pytest.mark.asyncio
+async def test_create_version_normalizes_concurrency_settings(platform_client: AsyncClient) -> None:
+    """With local ``src`` crawlee, API stores source unchanged; otherwise injects desired_concurrency."""
+    from crawlee_platform.config import Settings
+
+    r = await platform_client.post('/api/tasks', json={'name': 'norm-cc', 'description': ''}, headers=_headers())
+    r.raise_for_status()
+    task_id = r.json()['id']
+
+    code = (
+        'import asyncio\n'
+        'from crawlee import ConcurrencySettings\n'
+        'from crawlee.crawlers import PlaywrightCrawler\n'
+        'async def main() -> None:\n'
+        '    PlaywrightCrawler(concurrency_settings=ConcurrencySettings(min_concurrency=1, max_concurrency=2))\n'
+    )
+    r = await platform_client.post(
+        f'/api/tasks/{task_id}/versions',
+        json={'source_code': code, 'requirements_txt': 'crawlee[playwright]\n', 'meta': {}, 'created_by': 'tester'},
+        headers=_headers(),
+    )
+    r.raise_for_status()
+    saved = r.json()['source_code']
+    if Settings().effective_crawlee_source_path is not None:
+        assert saved == code
+    else:
+        assert 'desired_concurrency=2' in saved
+        assert 'ConcurrencySettings(min_concurrency=1, max_concurrency=2,' in saved
+
+
+@pytest.mark.asyncio
+async def test_delete_task(platform_client: AsyncClient) -> None:
+    r = await platform_client.post('/api/tasks', json={'name': 'to-delete', 'description': ''}, headers=_headers())
+    r.raise_for_status()
+    task_id = r.json()['id']
+
+    r = await platform_client.delete(f'/api/tasks/{task_id}', headers=_headers())
+    assert r.status_code == 204
+
+    r = await platform_client.get(f'/api/tasks/{task_id}', headers=_headers())
+    assert r.status_code == 404
 
 
 @pytest.mark.asyncio

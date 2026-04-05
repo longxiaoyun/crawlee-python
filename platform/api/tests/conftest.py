@@ -9,10 +9,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crawlee_platform import config as config_module
-from crawlee_platform import db as db_module
 from crawlee_platform.api_app import app
 from crawlee_platform.config import Settings
-from crawlee_platform.db import get_engine
+from crawlee_platform.db import get_engine, reset_database_singleton
 from crawlee_platform.deps import get_settings_cached
 from crawlee_platform.models import Base
 
@@ -26,8 +25,7 @@ async def platform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> As
     # Ignore repo `platform/config/platform.deploy.json` so deploy stays metadata-only in tests.
     monkeypatch.setattr(config_module, '_platform_deploy_json_path', lambda: None)
     get_settings_cached.cache_clear()
-    db_module._engine = None  # noqa: SLF001
-    db_module._session_factory = None  # noqa: SLF001
+    reset_database_singleton()
     settings = Settings()
     engine = get_engine(settings)
     async with engine.begin() as conn:

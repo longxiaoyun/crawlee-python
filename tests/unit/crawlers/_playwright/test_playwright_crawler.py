@@ -80,6 +80,20 @@ async def test_basic_request(method: HttpMethod, path: str, payload: HttpPayload
     assert (payload.decode() if payload else '') in result.get('page_content', '')
 
 
+async def test_goto_options_with_playwright_timeout_merges_with_navigation_budget(server_url: URL) -> None:
+    """`goto_options` may include `timeout` (ms); must not duplicate the `goto()` keyword."""
+    crawler = PlaywrightCrawler(
+        headless=True,
+        goto_options={'wait_until': 'networkidle', 'timeout': 30_000},
+    )
+
+    @crawler.router.default_handler
+    async def request_handler(context: PlaywrightCrawlingContext) -> None:
+        assert context.page is not None
+
+    await crawler.run([str(server_url)])
+
+
 async def test_enqueue_links(redirect_server_url: URL, server_url: URL) -> None:
     redirect_target = str(server_url / 'start_enqueue')
     redirect_url = str(redirect_server_url.with_path('redirect').with_query(url=redirect_target))

@@ -28,6 +28,9 @@ async def complete_chat(*, settings: Settings, user_message: str) -> tuple[str, 
                 'role': 'system',
                 'content': (
                     'You help write Crawlee for Python crawlers. '
+                    'Import crawlers from crawlee.crawlers (e.g. '
+                    'from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext), '
+                    'not from a non-existent crawlee.playwright_crawler module. '
                     'Respond concisely; when proposing code, wrap it in a fenced ```python block.'
                 ),
             },

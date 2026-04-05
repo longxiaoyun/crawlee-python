@@ -141,8 +141,9 @@ class PlaywrightCrawler(BasicCrawler[PlaywrightCrawlingContext, StatisticsState]
                 This option should not be used if `browser_pool` is provided.
             navigation_timeout: Timeout for navigation (the process between opening a Playwright page and calling
                 the request handler)
-            goto_options: Additional options to pass to Playwright's `Page.goto()` method. The `timeout` option is
-                not supported, use `navigation_timeout` instead.
+            goto_options: Additional options to pass to Playwright's `Page.goto()` method. If you pass Playwright's
+                ``timeout`` (milliseconds), it is merged with the navigation time budget as the minimum of the two.
+                For the overall navigation limit, prefer ``navigation_timeout`` on this crawler.
             kwargs: Additional keyword arguments to pass to the underlying `BasicCrawler`.
         """
         self._shared_navigation_timeouts: dict[int, SharedTimeout] = {}
@@ -212,7 +213,12 @@ class PlaywrightCrawler(BasicCrawler[PlaywrightCrawlingContext, StatisticsState]
             kwargs['concurrency_settings'] = ConcurrencySettings(desired_concurrency=1)
 
         self._navigation_timeout = navigation_timeout or timedelta(minutes=1)
-        self._goto_options = goto_options or GotoOptions()
+        _raw_goto = dict(goto_options or {})
+        # Playwright `Page.goto` timeout is applied in `_navigate` from SharedTimeout; allow ms here for min().
+        self._goto_user_timeout_ms: float | None = None
+        if 'timeout' in _raw_goto:
+            self._goto_user_timeout_ms = float(_raw_goto.pop('timeout'))
+        self._goto_options = GotoOptions(**_raw_goto) if _raw_goto else GotoOptions()
 
         super().__init__(**kwargs)
 
@@ -324,9 +330,14 @@ class PlaywrightCrawler(BasicCrawler[PlaywrightCrawlingContext, StatisticsState]
 
             try:
                 async with self._shared_navigation_timeouts[id(context)] as remaining_timeout:
-                    response = await context.page.goto(
-                        context.request.url, timeout=remaining_timeout.total_seconds() * 1000, **context.goto_options
-                    )
+                    goto_kw = dict(context.goto_options)
+                    goto_kw.pop('timeout', None)  # unsupported in goto_options; use navigation_timeout / crawler field
+                    remaining_ms = remaining_timeout.total_seconds() * 1000
+                    if self._goto_user_timeout_ms is not None:
+                        timeout_ms = min(remaining_ms, self._goto_user_timeout_ms)
+                    else:
+                        timeout_ms = remaining_ms
+                    response = await context.page.goto(context.request.url, timeout=timeout_ms, **goto_kw)
                 context.request.state = RequestState.AFTER_NAV
             except playwright.async_api.TimeoutError as exc:
                 raise asyncio.TimeoutError from exc

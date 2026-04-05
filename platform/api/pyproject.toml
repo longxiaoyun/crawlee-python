@@ -9,6 +9,7 @@ description = 'Control plane API and worker for the Crawlee web console platform
 readme = 'README.md'
 requires-python = '>=3.10'
 dependencies = [
+    'aiomysql>=0.2.0',
     'aiosqlite>=0.21.0',
     'asyncpg>=0.29.0',
     'crawlee',
